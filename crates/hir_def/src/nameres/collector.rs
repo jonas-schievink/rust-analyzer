@@ -11,13 +11,17 @@ use hir_expand::{
     ast_id_map::FileAstId,
     builtin_derive::find_builtin_derive,
     builtin_macro::find_builtin_macro,
+    hygiene::Hygiene,
     name::{AsName, Name},
     proc_macro::ProcMacroExpander,
     HirFileId, MacroCallId, MacroDefId, MacroDefKind,
 };
 use hir_expand::{InFile, MacroCallLoc};
 use rustc_hash::{FxHashMap, FxHashSet};
-use syntax::ast;
+use syntax::{
+    ast::{self, ModuleItemOwner},
+    match_ast, AstNode,
+};
 use test_utils::mark;
 use tt::{Leaf, TokenTree};
 
@@ -845,6 +849,32 @@ impl DefCollector<'_> {
             // FIXME: Handle eager macros.
         }
 
+        let ast = self.db.parse_or_expand(file_id);
+        if let Some(node) = ast {
+            match_ast! {
+                match node {
+                    ast::MacroItems(items) => {
+                        let mut items = items.items();
+                        let first = items.next();
+                        let second = items.next();
+                        if let (Some(ast::Item::MacroCall(m)), None) = (first, second) {
+                            let ast_map = self.db.ast_id_map(file_id);
+                            let ast_id = ast_map.ast_id(&m);
+                            let hygiene = Hygiene::new(self.db.upcast(), file_id);
+                            if let Some(path) = m.path().and_then(|path| ModPath::from_src(path, &hygiene)) {
+                                collect_macro_call(self, module_id, file_id, &MacroCall {
+                                    path,
+                                    ast_id,
+                                }, depth);
+                                return;
+                            }
+                        }
+                    },
+                    _ => {}
+                }
+            }
+        }
+
         // Then, fetch and process the item tree. This will reuse the expansion result from above.
         let item_tree = self.db.item_tree(file_id);
         let mod_dir = self.mod_dirs[&module_id].clone();
@@ -993,7 +1023,13 @@ impl ModCollector<'_, '_> {
                         status: PartialResolvedImport::Unresolved,
                     })
                 }
-                ModItem::MacroCall(mac) => self.collect_macro_call(&self.item_tree[mac]),
+                ModItem::MacroCall(mac) => collect_macro_call(
+                    &mut self.def_collector,
+                    self.module_id,
+                    self.file_id,
+                    &self.item_tree[mac],
+                    self.macro_depth,
+                ),
                 ModItem::MacroRules(id) => self.collect_macro_rules(id),
                 ModItem::MacroDef(id) => {
                     let mac = &self.item_tree[id];
@@ -1376,41 +1412,6 @@ impl ModCollector<'_, '_> {
         self.def_collector.define_macro(self.module_id, mac.name.clone(), macro_id, is_export);
     }
 
-    fn collect_macro_call(&mut self, mac: &MacroCall) {
-        let mut ast_id = AstIdWithPath::new(self.file_id, mac.ast_id, mac.path.clone());
-
-        // Case 1: try to resolve in legacy scope and expand macro_rules
-        if let Some(macro_call_id) =
-            ast_id.as_call_id(self.def_collector.db, self.def_collector.def_map.krate, |path| {
-                path.as_ident().and_then(|name| {
-                    self.def_collector.def_map[self.module_id].scope.get_legacy_macro(&name)
-                })
-            })
-        {
-            self.def_collector.unexpanded_macros.push(MacroDirective {
-                module_id: self.module_id,
-                ast_id,
-                legacy: Some(macro_call_id),
-                depth: self.macro_depth + 1,
-            });
-
-            return;
-        }
-
-        // Case 2: resolve in module scope, expand during name resolution.
-        // We rewrite simple path `macro_name` to `self::macro_name` to force resolve in module scope only.
-        if ast_id.path.is_ident() {
-            ast_id.path.kind = PathKind::Super(0);
-        }
-
-        self.def_collector.unexpanded_macros.push(MacroDirective {
-            module_id: self.module_id,
-            ast_id,
-            legacy: None,
-            depth: self.macro_depth + 1,
-        });
-    }
-
     fn import_all_legacy_macros(&mut self, module_id: LocalModuleId) {
         let macros = self.def_collector.def_map[module_id].scope.collect_legacy_macros();
         for (name, macro_) in macros {
@@ -1435,6 +1436,45 @@ impl ModCollector<'_, '_> {
     }
 }
 
+fn collect_macro_call(
+    def_collector: &mut DefCollector,
+    module_id: LocalModuleId,
+    file_id: HirFileId,
+    mac: &MacroCall,
+    prev_depth: usize,
+) {
+    let mut ast_id = AstIdWithPath::new(file_id, mac.ast_id, mac.path.clone());
+
+    // Case 1: try to resolve in legacy scope and expand macro_rules
+    if let Some(macro_call_id) =
+        ast_id.as_call_id(def_collector.db, def_collector.def_map.krate, |path| {
+            path.as_ident()
+                .and_then(|name| def_collector.def_map[module_id].scope.get_legacy_macro(&name))
+        })
+    {
+        def_collector.unexpanded_macros.push(MacroDirective {
+            module_id,
+            ast_id,
+            legacy: Some(macro_call_id),
+            depth: prev_depth + 1,
+        });
+
+        return;
+    }
+
+    // Case 2: resolve in module scope, expand during name resolution.
+    // We rewrite simple path `macro_name` to `self::macro_name` to force resolve in module scope only.
+    if ast_id.path.is_ident() {
+        ast_id.path.kind = PathKind::Super(0);
+    }
+
+    def_collector.unexpanded_macros.push(MacroDirective {
+        module_id,
+        ast_id,
+        legacy: None,
+        depth: prev_depth + 1,
+    });
+}
 #[cfg(test)]
 mod tests {
     use crate::{db::DefDatabase, test_db::TestDB};
