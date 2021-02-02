@@ -460,6 +460,16 @@ Primarily for debugging, but very useful for all people working on rust-analyzer
 Returns a textual representation of the HIR of the function containing the cursor.
 For debugging or when working on rust-analyzer itself.
 
+## View DefMap
+
+**Method:** `rust-analyzer/viewDefMap`
+
+**Request:** `TextDocumentPositionParams`
+
+**Response:** `string`
+
+Returns a text dump of the name resolution results at the cursor position.
+
 ## Expand Macro
 
 **Method:** `rust-analyzer/expandMacro`

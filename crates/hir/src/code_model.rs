@@ -145,6 +145,11 @@ impl Crate {
 
         doc_url.map(|s| s.trim_matches('"').trim_end_matches('/').to_owned() + "/")
     }
+
+    pub fn debug_def_map(self, db: &dyn HirDatabase) -> String {
+        let def_map = db.crate_def_map(self.id);
+        def_map.dump()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

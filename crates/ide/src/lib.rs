@@ -32,6 +32,7 @@ mod goto_definition;
 mod goto_implementation;
 mod goto_type_definition;
 mod view_hir;
+mod view_def_map;
 mod hover;
 mod inlay_hints;
 mod join_lines;
@@ -271,6 +272,10 @@ impl Analysis {
 
     pub fn view_hir(&self, position: FilePosition) -> Cancelable<String> {
         self.with_db(|db| view_hir::view_hir(&db, position))
+    }
+
+    pub fn view_def_map(&self, position: FilePosition) -> Cancelable<String> {
+        self.with_db(|db| view_def_map::view_def_map(&db, position))
     }
 
     pub fn expand_macro(&self, position: FilePosition) -> Cancelable<Option<ExpandedMacro>> {

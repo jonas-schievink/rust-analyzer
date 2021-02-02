@@ -61,6 +61,14 @@ impl Request for ViewHir {
     const METHOD: &'static str = "rust-analyzer/viewHir";
 }
 
+pub enum ViewDefMap {}
+
+impl Request for ViewDefMap {
+    type Params = lsp_types::TextDocumentPositionParams;
+    type Result = String;
+    const METHOD: &'static str = "rust-analyzer/viewDefMap";
+}
+
 pub enum ExpandMacro {}
 
 impl Request for ExpandMacro {
