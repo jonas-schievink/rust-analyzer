@@ -3,10 +3,7 @@
 //! request takes longer to compute. This modules implemented prepopulating of
 //! various caches, it's not really advanced at the moment.
 
-use hir::db::DefDatabase;
-use ide_db::base_db::SourceDatabase;
-
-use crate::RootDatabase;
+use hir::db::HirDatabase;
 
 #[derive(Debug)]
 pub enum PrimeCachesProgress {
@@ -21,7 +18,7 @@ pub enum PrimeCachesProgress {
     Finished,
 }
 
-pub(crate) fn prime_caches(db: &RootDatabase, cb: &(dyn Fn(PrimeCachesProgress) + Sync)) {
+pub(crate) fn prime_caches(db: &dyn HirDatabase, cb: &(dyn Fn(PrimeCachesProgress) + Sync)) {
     let _p = profile::span("prime_caches");
     let graph = db.crate_graph();
     let topo = &graph.crates_in_topological_order();
@@ -40,6 +37,8 @@ pub(crate) fn prime_caches(db: &RootDatabase, cb: &(dyn Fn(PrimeCachesProgress) 
             n_total: topo.len(),
         });
         db.crate_def_map(*krate);
+        db.inherent_impls_in_crate(*krate);
+        db.trait_impls_in_crate(*krate);
     }
 
     cb(PrimeCachesProgress::Finished);
