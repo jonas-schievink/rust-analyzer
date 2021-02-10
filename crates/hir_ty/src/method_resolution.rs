@@ -110,7 +110,9 @@ pub struct TraitImpls {
 
 impl TraitImpls {
     pub(crate) fn trait_impls_in_crate_query(db: &dyn HirDatabase, krate: CrateId) -> Arc<Self> {
-        let _p = profile::span("trait_impls_in_crate_query");
+        let _p = profile::span("trait_impls_in_crate_query").detail(|| {
+            db.crate_graph()[krate].display_name.as_deref().unwrap_or_default().to_string()
+        });
         let mut impls = Self { map: FxHashMap::default() };
 
         let crate_def_map = db.crate_def_map(krate);
@@ -197,6 +199,10 @@ pub struct InherentImpls {
 
 impl InherentImpls {
     pub(crate) fn inherent_impls_in_crate_query(db: &dyn HirDatabase, krate: CrateId) -> Arc<Self> {
+        let _p = profile::span("inherent_impls_in_crate_query").detail(|| {
+            db.crate_graph()[krate].display_name.as_deref().unwrap_or_default().to_string()
+        });
+
         let mut map: FxHashMap<_, Vec<_>> = FxHashMap::default();
 
         let crate_def_map = db.crate_def_map(krate);
