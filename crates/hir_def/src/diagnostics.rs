@@ -224,3 +224,30 @@ impl Diagnostic for MacroError {
         true
     }
 }
+
+// Diagnostic: unresolved-attribute
+//
+// This diagnostic is shown when an `#[attribute]` could not be resolved.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct UnresolvedAttribute {
+    pub file: HirFileId,
+    pub node: SyntaxNodePtr,
+}
+
+impl Diagnostic for UnresolvedAttribute {
+    fn code(&self) -> DiagnosticCode {
+        DiagnosticCode("unresolved-attribute")
+    }
+
+    fn message(&self) -> String {
+        "unresolved attribute".into()
+    }
+
+    fn display_source(&self) -> InFile<SyntaxNodePtr> {
+        InFile::new(self.file, self.node.clone())
+    }
+
+    fn as_any(&self) -> &(dyn Any + Send + 'static) {
+        self
+    }
+}

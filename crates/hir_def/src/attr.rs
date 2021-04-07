@@ -606,7 +606,8 @@ impl DocsRangeMap {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attr {
-    index: u32,
+    /// Index into the syntactical list of attributes.
+    pub(crate) index: u32,
     pub(crate) path: Interned<ModPath>,
     pub(crate) input: Option<AttrInput>,
 }

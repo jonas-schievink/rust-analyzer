@@ -466,7 +466,7 @@ mod diagnostics {
     use syntax::ast::AttrsOwner;
     use syntax::{ast, AstNode, AstPtr, SyntaxKind, SyntaxNodePtr};
 
-    use crate::path::ModPath;
+    use crate::{attr::Attr, path::ModPath};
     use crate::{db::DefDatabase, diagnostics::*, nameres::LocalModuleId, AstId};
 
     #[derive(Debug, PartialEq, Eq)]
@@ -484,6 +484,8 @@ mod diagnostics {
         UnresolvedMacroCall { ast: AstId<ast::MacroCall> },
 
         MacroError { ast: MacroCallKind, message: String },
+
+        UnresolvedAttribute { ast: AstId<ast::Item>, attr: Attr },
     }
 
     #[derive(Debug, PartialEq, Eq)]
@@ -548,6 +550,14 @@ mod diagnostics {
             ast: AstId<ast::MacroCall>,
         ) -> Self {
             Self { in_module: container, kind: DiagnosticKind::UnresolvedMacroCall { ast } }
+        }
+
+        pub(super) fn unresolved_attribute(
+            container: LocalModuleId,
+            ast: AstId<ast::Item>,
+            attr: Attr,
+        ) -> Self {
+            Self { in_module: container, kind: DiagnosticKind::UnresolvedAttribute { attr, ast } }
         }
 
         pub(super) fn add_to(
@@ -615,7 +625,16 @@ mod diagnostics {
                     let (file, ast, name) = match ast {
                         MacroCallKind::FnLike(ast) => {
                             let node = ast.to_node(db.upcast());
-                            (ast.file_id, SyntaxNodePtr::from(AstPtr::new(&node)), None)
+                            (ast.file_id, SyntaxNodePtr::new(node.syntax()), None)
+                        }
+                        MacroCallKind::Attr(ast, name, attr_index) => {
+                            let node = ast.to_node(db.upcast());
+                            let attr = node
+                                .attrs()
+                                .nth((*attr_index) as usize)
+                                .expect("failed to find original attribute");
+                            let path = attr.path().unwrap();
+                            (ast.file_id, SyntaxNodePtr::new(path.syntax()), Some(name.clone()))
                         }
                         MacroCallKind::Derive(ast, name) => {
                             let node = ast.to_node(db.upcast());
@@ -671,14 +690,24 @@ mod diagnostics {
                     let (file, ast) = match ast {
                         MacroCallKind::FnLike(ast) => {
                             let node = ast.to_node(db.upcast());
-                            (ast.file_id, SyntaxNodePtr::from(AstPtr::new(&node)))
+                            (ast.file_id, SyntaxNodePtr::new(node.syntax()))
                         }
-                        MacroCallKind::Derive(ast, _) => {
+                        MacroCallKind::Derive(ast, _) | MacroCallKind::Attr(ast, ..) => {
                             let node = ast.to_node(db.upcast());
-                            (ast.file_id, SyntaxNodePtr::from(AstPtr::new(&node)))
+                            (ast.file_id, SyntaxNodePtr::new(node.syntax()))
                         }
                     };
                     sink.push(MacroError { file, node: ast, message: message.clone() });
+                }
+
+                DiagnosticKind::UnresolvedAttribute { ast, attr } => {
+                    let node = ast.to_node(db.upcast());
+                    let attr = node
+                        .attrs()
+                        .nth(attr.index as usize)
+                        .expect("failed to find original attribute");
+                    let ptr = SyntaxNodePtr::new(&attr.path().unwrap().syntax());
+                    sink.push(UnresolvedAttribute { file: ast.file_id, node: ptr });
                 }
             }
         }
