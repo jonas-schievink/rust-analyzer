@@ -225,9 +225,7 @@ impl Subtree {
     pub fn delimiter_kind(&self) -> Option<DelimiterKind> {
         self.delimiter.map(|it| it.kind)
     }
-}
 
-impl Subtree {
     /// A simple line string used for debugging
     pub fn as_debug_string(&self) -> String {
         let delim = match self.delimiter_kind() {

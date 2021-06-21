@@ -2,7 +2,7 @@
 
 use std::{
     convert::{TryFrom, TryInto},
-    fmt, ops,
+    fmt, iter, ops,
     sync::Arc,
 };
 
@@ -12,11 +12,11 @@ use either::Either;
 use hir_expand::{hygiene::Hygiene, name::AsName, AstId, InFile};
 use itertools::Itertools;
 use la_arena::ArenaMap;
-use mbe::ast_to_token_tree;
+use mbe::{ast_to_token_tree, syntax_node_to_token_tree};
 use smallvec::{smallvec, SmallVec};
 use syntax::{
     ast::{self, AstNode, AttrsOwner},
-    match_ast, AstPtr, AstToken, SmolStr, SyntaxNode, TextRange, TextSize,
+    match_ast, AstPtr, AstToken, SmolStr, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize,
 };
 use tt::Subtree;
 
@@ -176,6 +176,7 @@ impl RawAttrs {
                     let tree = Subtree { delimiter: None, token_trees: attr.to_vec() };
                     // FIXME hygiene
                     let hygiene = Hygiene::new_unhygienic();
+                    let index = AttrId { token_ids: first_and_last_token_id(&tree), ..index };
                     Attr::from_tt(db, &tree, &hygiene, index)
                 });
 
@@ -572,9 +573,57 @@ impl AttrSourceMap {
     /// `attr` must come from the `owner` used for AttrSourceMap
     ///
     /// Note that the returned syntax node might be a `#[cfg_attr]`, or a doc comment, instead of
-    /// the attribute represented by `Attr`.
-    pub fn source_of(&self, attr: &Attr) -> InFile<Either<ast::Attr, ast::Comment>> {
+    /// the attribute represented by `Attr`. If a more precise mapping is needed, use
+    /// `inner_tokens_of` or `range_of` instead.
+    pub fn source_node_of(&self, attr: &Attr) -> InFile<Either<ast::Attr, ast::Comment>> {
         self.source_of_id(attr.id)
+    }
+
+    /// Returns an iterator over an attribute's inner tokens (ignoring the surrounded `#[]` if
+    /// present).
+    ///
+    /// This accounts for `cfg_attr` and will only iterate over the tokens that make up `attr`.
+    ///
+    /// For doc comments, this will simply yield the doc comment token.
+    pub fn inner_tokens_of(&self, attr: &Attr) -> impl Iterator<Item = SyntaxToken> {
+        match self.source_of_id(attr.id).value {
+            Either::Left(ast) => {
+                let meta = ast.meta().unwrap(); // can't fail because then we wouldn't have `attr`
+                let range = self.range_of(attr).value;
+
+                Either::Left(
+                    meta.syntax()
+                        .children_with_tokens()
+                        .filter_map(|elem| elem.into_token())
+                        .filter(move |tok| range.contains_range(tok.text_range())),
+                )
+            }
+            Either::Right(doc) => Either::Right(iter::once(doc.syntax().clone())),
+        }
+    }
+
+    /// Computes the range occupied by `attr`'s tokens.
+    ///
+    /// This accounts for `cfg_attr` and will only include the tokens that make up `attr`.
+    pub fn range_of(&self, attr: &Attr) -> InFile<TextRange> {
+        let source = self.source_of_id(attr.id);
+        source.with_value(match &source.value {
+            Either::Left(ast) => {
+                let meta = ast.meta().unwrap(); // can't fail because then we wouldn't have `attr`
+                match attr.id.token_ids {
+                    Some((first, last, kind)) => {
+                        let (_, map) = syntax_node_to_token_tree(meta.syntax());
+                        // HACK: use `IDENT` because it only matters for parentheses, which cannot appear at the start
+                        let first = map.range_by_token(first, SyntaxKind::IDENT).unwrap();
+                        let last = map.range_by_token(last, kind).unwrap();
+                        // TODO BUG this is relative range!
+                        first.cover(last)
+                    }
+                    None => meta.syntax().text_range(),
+                }
+            }
+            Either::Right(doc) => doc.syntax().text_range(),
+        })
     }
 
     fn source_of_id(&self, id: AttrId) -> InFile<Either<ast::Attr, ast::Comment>> {
@@ -636,6 +685,12 @@ impl DocsRangeMap {
 pub(crate) struct AttrId {
     is_doc_comment: bool,
     pub(crate) ast_index: u32,
+    /// If this attribute is produced by a `cfg_attr`, this stores the start and end token of this
+    /// attribute in the token tree created from the whole `cfg_attr` node.
+    ///
+    /// The `SyntaxKind` of the last token is stored because it is required by the `TokenMap` API.
+    /// It should probably go away.
+    token_ids: Option<(tt::TokenId, tt::TokenId, SyntaxKind)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -802,7 +857,7 @@ fn collect_attrs(
     let attrs =
         outer_attrs.chain(inner_attrs.into_iter().flatten()).enumerate().map(|(idx, attr)| {
             (
-                AttrId { ast_index: idx as u32, is_doc_comment: false },
+                AttrId { ast_index: idx as u32, is_doc_comment: false, token_ids: None },
                 attr.syntax().text_range().start(),
                 Either::Left(attr),
             )
@@ -813,13 +868,44 @@ fn collect_attrs(
     let docs =
         outer_docs.chain(inner_docs.into_iter().flatten()).enumerate().map(|(idx, docs_text)| {
             (
-                AttrId { ast_index: idx as u32, is_doc_comment: true },
+                AttrId { ast_index: idx as u32, is_doc_comment: true, token_ids: None },
                 docs_text.syntax().text_range().start(),
                 Either::Right(docs_text),
             )
         });
     // sort here by syntax node offset because the source can have doc attributes and doc strings be interleaved
     docs.chain(attrs).sorted_by_key(|&(_, offset, _)| offset).map(|(id, _, attr)| (id, attr))
+}
+
+fn first_and_last_token_id(tt: &tt::Subtree) -> Option<(tt::TokenId, tt::TokenId, SyntaxKind)> {
+    fn tid_tt(tt: &tt::TokenTree) -> Option<(tt::TokenId, tt::TokenId, SyntaxKind)> {
+        match tt {
+            tt::TokenTree::Leaf(tt::Leaf::Ident(ident)) => {
+                Some((ident.id, ident.id, SyntaxKind::IDENT))
+            }
+            tt::TokenTree::Leaf(tt::Leaf::Literal(lit)) => {
+                Some((lit.id, lit.id, SyntaxKind::IDENT))
+            }
+            tt::TokenTree::Leaf(tt::Leaf::Punct(punct)) => {
+                Some((punct.id, punct.id, SyntaxKind::IDENT))
+            }
+            tt::TokenTree::Subtree(tree) => first_and_last_token_id(tree),
+        }
+    }
+
+    if let Some(delim) = &tt.delimiter {
+        let kind = match delim.kind {
+            mbe::DelimiterKind::Parenthesis => SyntaxKind::R_PAREN,
+            mbe::DelimiterKind::Brace => SyntaxKind::R_CURLY,
+            mbe::DelimiterKind::Bracket => SyntaxKind::R_BRACK,
+        };
+        return Some((delim.id, delim.id, kind));
+    }
+
+    let first = tt.token_trees.iter().find_map(|tt| tid_tt(tt))?.0;
+    let (_, last, kind) = tt.token_trees.iter().rev().find_map(|tt| tid_tt(tt))?;
+
+    Some((first, last, kind))
 }
 
 pub(crate) fn variants_attrs_source_map(

@@ -6,8 +6,8 @@ use either::Either;
 use hir::{InFile, Semantics};
 use ide_db::{call_info::ActiveParameter, helpers::rust_doc::is_rust_fence, SymbolKind};
 use syntax::{
-    ast::{self, AstNode, IsString},
-    AstToken, NodeOrToken, SyntaxNode, SyntaxToken, TextRange, TextSize,
+    ast::{self, IsString},
+    AstToken, SyntaxNode, SyntaxToken, TextRange, TextSize,
 };
 
 use crate::{
@@ -124,16 +124,17 @@ pub(super) fn doc_comment(
     }
 
     for attr in attributes.by_key("doc").attrs() {
-        let InFile { file_id, value: src } = attrs_source_map.source_of(attr);
+        let InFile { file_id, value: src } = attrs_source_map.source_node_of(attr);
         if file_id != node.file_id {
             continue;
         }
         let (line, range, prefix) = match &src {
-            Either::Left(it) => {
-                string = match find_doc_string_in_attr(attr, it) {
-                    Some(it) => it,
-                    None => continue,
-                };
+            Either::Left(_) => {
+                string =
+                    match find_doc_string_in_tokens(attr, attrs_source_map.inner_tokens_of(attr)) {
+                        Some(it) => it,
+                        None => continue,
+                    };
                 let text_range = string.syntax().text_range();
                 let text_range = TextRange::new(
                     text_range.start() + TextSize::from(1),
@@ -211,29 +212,22 @@ pub(super) fn doc_comment(
     }
 }
 
-fn find_doc_string_in_attr(attr: &hir::Attr, it: &ast::Attr) -> Option<ast::String> {
-    match it.expr() {
-        // #[doc = lit]
-        Some(ast::Expr::Literal(lit)) => match lit.kind() {
-            ast::LiteralKind::String(it) => Some(it),
-            _ => None,
-        },
-        // #[cfg_attr(..., doc = "", ...)]
-        None => {
-            // We gotta hunt the string token manually here
-            let text = attr.string_value()?;
-            // FIXME: We just pick the first string literal that has the same text as the doc attribute
-            // This means technically we might highlight the wrong one
-            it.syntax()
-                .descendants_with_tokens()
-                .filter_map(NodeOrToken::into_token)
-                .filter_map(ast::String::cast)
-                .find(|string| {
-                    string.text().get(1..string.text().len() - 1).map_or(false, |it| it == text)
-                })
+fn find_doc_string_in_tokens(
+    attr: &hir::Attr,
+    tokens: impl Iterator<Item = SyntaxToken>,
+) -> Option<ast::String> {
+    // FIXME: this doesn't handle macros ("extended key-value attributes"), but neither does the
+    // rest of r-a
+    let text = attr.string_value()?;
+    for token in tokens {
+        eprintln!("'{}'", token);
+        if let Some(string) = ast::String::cast(token) {
+            if string.text().get(1..string.text().len() - 1).map_or(false, |it| it == text) {
+                return Some(string);
+            }
         }
-        _ => None,
     }
+    None
 }
 
 fn module_def_to_hl_tag(def: hir::ModuleDef) -> HlTag {
